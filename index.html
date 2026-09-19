@@ -608,7 +608,7 @@ const mapMsg=r=>({id:r.id,cid:r.conversation_id,uid:r.user_id,text:r.text||'',im
   deleted:!!r.deleted,demo:!!r.demo,createdAt:ms(r.created_at)});
 
 async function remoteLoadAll(){
-  const one=async(t,sel,ord,lim)=>{try{let q=SB.from(t).select(sel||'*').limit(lim||1000);if(ord)q=q.order(ord[0],{ascending:ord[1]});const{data,error}=await q;if(error)throw error;return data||[]}
+  const one=async(t,sel,ord,lim)=>{try{let q=SB.from(t).select(sel||'*').limit(lim||1000);if(ord){const col=Array.isArray(ord)?ord[0]:ord;const asc=Array.isArray(ord)?!!ord[1]:true;q=q.order(col,{ascending:asc})}const{data,error}=await q;if(error)throw error;return data||[]}
     catch(e){console.error('[GHA] load '+t+':',e.message);return[]}};
   const profiles=await one('profiles','*','created_at',500);
   const posts=await one('posts','*',['created_at',false],200);
