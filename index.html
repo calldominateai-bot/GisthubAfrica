@@ -1552,7 +1552,7 @@ function authTab(t){state.authTab=t;const b=document.getElementById('authBody');
   if(t==='login')b.innerHTML=head+'<h2>Welcome back</h2><p class="sub">Tell your gist. Africa is listening.</p>'+
    '<div class="field"><label>Username or email</label><input id="liId"></div>'+
    '<div class="field"><label>Password</label><input id="liPass" type="password"></div>'+
-   '<button class="btn pri" style="width:100%" data-action="login">Log in</button>'+
+   '<button id="loginBtn" type="button" class="btn pri" style="width:100%" data-action="login" onclick="event.stopPropagation();window.gistHubLogin&&window.gistHubLogin(this)">Log in</button>'+
    '<p class="foot"><button class="lnk" data-action="forgot">Forgot password?</button>'+(!REMOTE?' · <button class="lnk blue" data-action="demo-login">Explore as Emmanuel (demo)</button>':'')+'</p>';
   else if(t==='signup')b.innerHTML=head+'<h2>Create your account</h2><p class="sub">Your own space on GistHubAfrica.</p>'+
    '<div class="frow2"><div class="field"><label>Display name *</label><input id="suName"></div><div class="field"><label>Username *</label><input id="suUser" placeholder="lowercase, no spaces"></div></div>'+
@@ -1704,10 +1704,30 @@ const ACTIONS={
  profile(t){state.view='profile';state.profile=t.getAttribute('data-uid');state.ptab='gists';closePops();renderMain();scrollTo({top:0})},
  authtab(t){authTab(t.getAttribute('data-t'))},
  'authtab-x'(t){authTab(t.getAttribute('data-t'))},
- async login(){const r=await api.login(document.getElementById('liId').value,document.getElementById('liPass').value);
-  if(r.err)return toast(r.err,'x');
-  if(r.demo)toast('Exploring as Emmanuel (demo)','sparkle');
-  await loadSnapshot();renderAll();toast('Welcome back!','check')},
+ async login(btn){
+  const idEl=document.getElementById('liId'),passEl=document.getElementById('liPass');
+  if(!idEl||!passEl)return toast('Login form is not ready. Refresh the page and try again.','x');
+  const ident=idEl.value.trim(),pass=passEl.value;
+  if(!ident)return toast('Enter your username or email.','x');
+  if(!pass)return toast('Enter your password.','x');
+  const b=btn&&btn.tagName?btn:document.getElementById('loginBtn');
+  const old=b?b.textContent:'Log in';
+  if(b){b.disabled=true;b.textContent='Logging in…'}
+  try{
+    const r=await Promise.race([
+      api.login(ident,pass),
+      new Promise(resolve=>setTimeout(()=>resolve({err:'Login is taking too long. Please try again.'}),20000))
+    ]);
+    if(r.err)return toast(r.err,'x');
+    if(r.demo)toast('Exploring as Emmanuel (demo)','sparkle');
+    await loadSnapshot();renderAll();toast('Welcome back!','check');
+  }catch(e){
+    console.error('[GHA] login failed:',e);
+    toast((e&&e.message)||'Login failed. Please try again.','x');
+  }finally{
+    const live=document.getElementById('loginBtn');
+    if(live){live.disabled=false;live.textContent=old}
+  }},
  'demo-login'(){if(REMOTE)return toast('Demo login runs in the offline copy — sign up free here, it takes 20 seconds','sparkle');
   const em=(D.users||[]).find(u=>u.id==='demo_emmanuel');
   if(!em)return toast('Demo user not found — reload the page','x');
@@ -1997,6 +2017,7 @@ const ACTIONS={
   updateBadges()})()},
  'jump-post'(t){goFeedAndFlash(t.getAttribute('data-id'))},
 };
+window.gistHubLogin=function(btn){return ACTIONS.login(btn)};
 
 /* ---------- global listeners ---------- */
 document.addEventListener('click',e=>{
