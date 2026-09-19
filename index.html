@@ -602,7 +602,7 @@ function ensureAuthProfile(user){
   return me;
 }
 const mapPost=r=>({id:r.id,uid:r.user_id,text:r.text||'',images:r.images||[],privacy:r.privacy||'pub',
-  feeling:r.feeling||'',groupId:r.group_id,demo:!!r.demo,editedAt:r.editedAt?ms(r.edited_at):null,
+  feeling:r.feeling||'',groupId:r.group_id,demo:!!r.demo,editedAt:r.edited_at?ms(r.edited_at):null,
   baseStats:r.base_stats||{},baseComments:r.base_comments||0,baseShares:r.base_shares||0,createdAt:ms(r.created_at)});
 const mapMsg=r=>({id:r.id,cid:r.conversation_id,uid:r.user_id,text:r.text||'',image:r.image_url||null,
   deleted:!!r.deleted,demo:!!r.demo,createdAt:ms(r.created_at)});
@@ -783,7 +783,7 @@ const api={
       p.text=text.trim();if(!p.groupId)p.privacy=privacy;p.editedAt=Date.now();
       await DB.put('posts',p);return{ok:true};
     }
-    const{error}=await SB.from('posts').update({text:text.trim(),privacy:privacy,edited_at:new Date().toISOString()}).eq('id',id).eq('user_id',auth.uid());
+    const{error}=await SB.from('posts').update({text:text.trim(),privacy:privacy,edited_at:new Date().toISOString()}).eq('id',id).eq('user_id',auth.uid);
     if(error)return{err:error.message};return{ok:true};
   },
   async deletePost(id){
@@ -966,7 +966,7 @@ const api={
     }
     const{error}=await SB.from('messages').insert({conversation_id:cid,user_id:auth.uid,text:text.trim(),image_url:imageUrl||null});
     if(error)return{err:error.message};
-    try{await SB.from('conversation_members').update({last_read_at:new Date().toISOString()}).eq('conversation_id',cid).eq('user_id',auth.uid())}catch(e){}
+    try{await SB.from('conversation_members').update({last_read_at:new Date().toISOString()}).eq('conversation_id',cid).eq('user_id',auth.uid)}catch(e){}
     const other=(D.convMembers||[]).find(m=>m.cid===cid&&m.uid!==auth.uid);
     if(other)await notify(other.uid,auth.uid,'msg','sent you a gist message.',{k:'chat',id:cid});
     return{ok:true};
@@ -987,7 +987,7 @@ const api={
       for(const n of(D.notifications||[]).filter(n=>n.uid===auth.uid&&!n.read&&n.ref&&n.ref.k==='chat'&&n.ref.id===cid)){n.read=true;await DB.put('notifications',n)}
       return;
     }
-    try{await SB.from('conversation_members').update({last_read_at:new Date().toISOString()}).eq('conversation_id',cid).eq('user_id',auth.uid());
+    try{await SB.from('conversation_members').update({last_read_at:new Date().toISOString()}).eq('conversation_id',cid).eq('user_id',auth.uid);
     const list=(D.notifications||[]).filter(n=>n.uid===auth.uid&&!n.read&&n.ref&&n.ref.k==='chat'&&n.ref.id===cid);
     for(const n of list)await SB.from('notifications').update({read:true}).eq('id',n.id)}catch(e){}
   },
@@ -997,7 +997,7 @@ const api={
       if(!m||m.uid!==auth.uid)return{err:'You can only delete your own messages.'};
       m.deleted=true;m.text='';m.image=null;await DB.put('messages',m);return{ok:true};
     }
-    const{error}=await SB.from('messages').update({deleted:true,text:'',image_url:null}).eq('id',mid).eq('user_id',auth.uid());
+    const{error}=await SB.from('messages').update({deleted:true,text:'',image_url:null}).eq('id',mid).eq('user_id',auth.uid);
     if(error)return{err:error.message};return{ok:true};
   },
   async createStory(f){
@@ -1072,7 +1072,7 @@ const api={
     }
     const up={};if(f.name)up.name=f.name;if(f.desc!=null)up.description=f.desc;if(f.privacy)up.privacy=f.privacy;
     if(f.photoId!==undefined)up.photo_url=f.photoId;
-    const{error}=await SB.from('groups').update(up).eq('id',gid).eq('owner',auth.uid());
+    const{error}=await SB.from('groups').update(up).eq('id',gid).eq('owner',auth.uid);
     if(error)return{err:error.message};return{ok:true};
   },
   async markAllRead(){
@@ -1081,7 +1081,7 @@ const api={
   },
   async markNotifRead(id){
     if(!REMOTE){const n=await DB.get('notifications',id);if(n){n.read=true;await DB.put('notifications',n)}return}
-    try{await SB.from('notifications').update({read:true}).eq('id',id).eq('user_id',auth.uid())}catch(e){}
+    try{await SB.from('notifications').update({read:true}).eq('id',id).eq('user_id',auth.uid)}catch(e){}
   },
   async report(type,targetId,reason){
     if(!REMOTE){await DB.put('reports',{id:uid(),by:auth.uid,type,targetId,reason,done:false,demo:false,createdAt:Date.now()});return{ok:true}}
