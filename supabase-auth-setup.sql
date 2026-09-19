@@ -1,127 +1,93 @@
--- Run this once in Supabase SQL Editor.
--- It makes every Auth account receive a durable public profile.
+-- GistHubAfrica authentication and profile repair.
+-- This matches the migration applied to the production Supabase project.
+
+begin;
 
 create unique index if not exists profiles_username_lower_unique
   on public.profiles (lower(username));
 
-alter table public.profiles enable row level security;
-
-do $$
-begin
-  if not exists (
-    select 1 from pg_policies
-    where schemaname = 'public' and tablename = 'profiles'
-      and policyname = 'Profiles are publicly readable'
-  ) then
-    create policy "Profiles are publicly readable"
-      on public.profiles for select
-      using (true);
-  end if;
-
-  if not exists (
-    select 1 from pg_policies
-    where schemaname = 'public' and tablename = 'profiles'
-      and policyname = 'Users can insert their own profile'
-  ) then
-    create policy "Users can insert their own profile"
-      on public.profiles for insert
-      with check (auth.uid() = id);
-  end if;
-
-  if not exists (
-    select 1 from pg_policies
-    where schemaname = 'public' and tablename = 'profiles'
-      and policyname = 'Users can update their own profile'
-  ) then
-    create policy "Users can update their own profile"
-      on public.profiles for update
-      using (auth.uid() = id)
-      with check (auth.uid() = id);
-  end if;
-end
-$$;
-
-create or replace function public.create_gisthub_profile()
+create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  requested_username text;
+  admin_flag boolean := false;
+  clean_username text;
 begin
-  requested_username := lower(regexp_replace(
-    coalesce(nullif(new.raw_user_meta_data ->> 'username', ''), split_part(new.email, '@', 1)),
-    '[^a-z0-9_]', '', 'g'
-  ));
+  clean_username := left(
+    lower(regexp_replace(
+      coalesce(
+        nullif(new.raw_user_meta_data->>'username',''),
+        split_part(new.email,'@',1)
+      ),
+      '[^a-z0-9_]', '', 'g'
+    )),
+    20
+  );
 
-  if length(requested_username) < 3 then
-    requested_username := 'user_' || left(replace(new.id::text, '-', ''), 8);
+  if length(clean_username) < 3 then
+    clean_username := 'user_' || substr(replace(new.id::text,'-',''),1,10);
+  end if;
+
+  if tg_op = 'INSERT'
+     and not exists(select 1 from public.profiles where demo = false) then
+    admin_flag := true;
   end if;
 
   insert into public.profiles (
     id, username, display_name, bio, country, city, gender, birthday,
-    verified, suspended, is_admin, demo, created_at, last_seen
+    verified, is_admin
   )
   values (
     new.id,
-    left(requested_username, 20),
-    coalesce(nullif(new.raw_user_meta_data ->> 'display_name', ''), left(requested_username, 20)),
-    coalesce(new.raw_user_meta_data ->> 'bio', ''),
-    coalesce(new.raw_user_meta_data ->> 'country', ''),
-    coalesce(new.raw_user_meta_data ->> 'city', ''),
-    coalesce(new.raw_user_meta_data ->> 'gender', ''),
-    nullif(new.raw_user_meta_data ->> 'birthday', '')::date,
+    clean_username,
+    coalesce(
+      nullif(new.raw_user_meta_data->>'display_name',''),
+      clean_username
+    ),
+    coalesce(new.raw_user_meta_data->>'bio',''),
+    coalesce(new.raw_user_meta_data->>'country',''),
+    coalesce(new.raw_user_meta_data->>'city',''),
+    coalesce(new.raw_user_meta_data->>'gender',''),
+    coalesce(new.raw_user_meta_data->>'birthday',''),
     new.email_confirmed_at is not null,
-    false,
-    false,
-    false,
-    now(),
-    now()
+    admin_flag
   )
-  on conflict (id) do update set
-    username = excluded.username,
-    display_name = excluded.display_name,
-    bio = excluded.bio,
-    country = excluded.country,
-    city = excluded.city,
-    gender = excluded.gender,
-    birthday = excluded.birthday,
-    verified = excluded.verified,
-    last_seen = excluded.last_seen;
+  on conflict (id) do update
+    set verified = excluded.verified;
 
   return new;
-end;
+end
 $$;
 
-drop trigger if exists create_gisthub_profile_after_signup on auth.users;
+drop trigger if exists on_auth_user_created on auth.users;
 
-create trigger create_gisthub_profile_after_signup
+create trigger on_auth_user_created
 after insert or update of email_confirmed_at on auth.users
-for each row execute function public.create_gisthub_profile();
+for each row execute function public.handle_new_user();
 
--- Repair profiles for Auth users who signed up before this trigger existed.
-insert into public.profiles (
-  id, username, display_name, bio, country, city, gender, birthday,
-  verified, suspended, is_admin, demo, created_at, last_seen
-)
-select
-  u.id,
-  left(lower(regexp_replace(
-    coalesce(nullif(u.raw_user_meta_data ->> 'username', ''), split_part(u.email, '@', 1)),
-    '[^a-z0-9_]', '', 'g'
-  )), 20),
-  coalesce(nullif(u.raw_user_meta_data ->> 'display_name', ''), split_part(u.email, '@', 1)),
-  coalesce(u.raw_user_meta_data ->> 'bio', ''),
-  coalesce(u.raw_user_meta_data ->> 'country', ''),
-  coalesce(u.raw_user_meta_data ->> 'city', ''),
-  coalesce(u.raw_user_meta_data ->> 'gender', ''),
-  nullif(u.raw_user_meta_data ->> 'birthday', '')::date,
-  u.email_confirmed_at is not null,
-  false,
-  false,
-  false,
-  u.created_at,
-  now()
+update public.profiles p
+set verified = true
 from auth.users u
-where not exists (select 1 from public.profiles p where p.id = u.id);
+where u.id = p.id
+  and u.email_confirmed_at is not null
+  and coalesce(p.verified,false) = false;
+
+drop policy if exists gm_read on public.group_members;
+
+create policy gm_read
+on public.group_members
+for select
+using (
+  user_id = auth.uid()
+  or exists (
+    select 1
+    from public.groups g
+    where g.id = group_members.group_id
+      and (g.privacy = 'pub' or g.owner = auth.uid())
+  )
+);
+
+commit;
