@@ -526,6 +526,10 @@ async function initRemote(){
   catch(e){mod=await import('https://esm.sh/@supabase/supabase-js@2')}
   SB=mod.createClient(GHA_CONFIG.url,GHA_CONFIG.anonKey,{auth:{persistSession:true,autoRefreshToken:true,storage:safeStorage}});
   SB.auth.onAuthStateChange((ev,session)=>{
+    if((ev==='SIGNED_IN'||ev==='TOKEN_REFRESHED'||ev==='INITIAL_SESSION')&&session&&session.user){
+      auth.uid=session.user.id;
+      try{ensureAuthProfile(session.user)}catch(e){}
+    }
     if(ev==='SIGNED_OUT'){auth.uid=null;try{renderAll()}catch(e){}}
     if(ev==='PASSWORD_RECOVERY'){api.openRecoveryModal()}
   });
@@ -533,6 +537,7 @@ async function initRemote(){
   if(session&&session.user){
     auth.uid=session.user.id;
     await loadSnapshot();
+    ensureAuthProfile(session.user);
     const me=ME();
     if(me&&me.suspended){await SB.auth.signOut();auth.uid=null;return{err:'This account is suspended.'}}
     api.syncVerified();
@@ -555,6 +560,27 @@ const mapProfile=r=>({id:r.id,username:r.username,name:r.display_name||r.usernam
   photoId:r.photo_url||null,coverId:r.cover_url||null,verified:!!r.verified,suspended:!!r.suspended,
   demo:!!r.demo,mutualBase:r.mutual_base!=null?r.mutual_base:null,
   role:r.is_admin?'admin':'user',createdAt:ms(r.created_at),lastSeen:ms(r.last_seen)});
+function ensureAuthProfile(user){
+  if(!user||!user.id)return null;
+  D.profiles=D.profiles||[];
+  let me=D.profiles.find(p=>p.id===user.id);
+  const md=user.user_metadata||{};
+  if(!me){
+    const username=String(md.username||((user.email||'user').split('@')[0])||'user').trim().toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,20)||'user';
+    me={
+      id:user.id,username:username,name:md.display_name||md.name||username,displayName:md.display_name||md.name||username,
+      email:user.email||'',bio:md.bio||'',country:md.country||'',city:md.city||'',gender:md.gender||'',birthday:md.birthday||'',
+      photoId:null,coverId:null,verified:!!user.email_confirmed_at,suspended:false,demo:false,mutualBase:null,
+      role:'user',createdAt:ms(user.created_at),lastSeen:Date.now()
+    };
+    D.profiles.push(me);
+  }else{
+    if(user.email&&!me.email)me.email=user.email;
+    if(user.email_confirmed_at)me.verified=true;
+  }
+  D.users=D.profiles;
+  return me;
+}
 const mapPost=r=>({id:r.id,uid:r.user_id,text:r.text||'',images:r.images||[],privacy:r.privacy||'pub',
   feeling:r.feeling||'',groupId:r.group_id,demo:!!r.demo,editedAt:r.editedAt?ms(r.edited_at):null,
   baseStats:r.base_stats||{},baseComments:r.base_comments||0,baseShares:r.base_shares||0,createdAt:ms(r.created_at)});
@@ -653,6 +679,7 @@ const api={
     const{data,error}=await SB.auth.signInWithPassword({email:email,password:pass});
     if(error)return{err:error.message};
     auth.uid=data.user.id;await loadSnapshot();
+    ensureAuthProfile(data.user);
     const me=ME();if(me&&me.suspended){await SB.auth.signOut();auth.uid=null;return{err:'This account is suspended.'}}
     api.syncVerified();return{ok:true};
   },
@@ -1506,7 +1533,7 @@ function renderMain(){const m=document.getElementById('main');if(!m)return;
   try{buildLeft();buildBnav()}catch(err){console.error('[GHA] nav render failed:',err)}}
 function renderAll(){
   if(!auth.uid){renderAuth();document.getElementById('dock').innerHTML='';const b=document.getElementById('bnav');if(b)b.innerHTML='';return}
-  const me=ME();if(!me){clearSession();auth.uid=null;renderAuth();return}
+  const me=ME();if(!me){console.error('[GHA] authenticated user profile was not loaded; keeping the Supabase session active');renderAuth();return}
   try{buildTop()}catch(err){console.error('[GHA] top render failed:',err);return}
   renderMain();
   try{buildRight()}catch(err){console.error('[GHA] right render failed:',err)}
