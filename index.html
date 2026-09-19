@@ -528,7 +528,12 @@ async function initRemote(){
   SB.auth.onAuthStateChange((ev,session)=>{
     if((ev==='SIGNED_IN'||ev==='TOKEN_REFRESHED'||ev==='INITIAL_SESSION')&&session&&session.user){
       auth.uid=session.user.id;
-      try{ensureAuthProfile(session.user)}catch(e){}
+      setTimeout(async()=>{try{
+        await ensureRemoteProfile(session.user);
+        await loadSnapshot();
+        ensureAuthProfile(session.user);
+        renderAll();
+      }catch(e){console.error('[GHA] auth refresh:',e)}},0);
     }
     if(ev==='SIGNED_OUT'){auth.uid=null;try{renderAll()}catch(e){}}
     if(ev==='PASSWORD_RECOVERY'){api.openRecoveryModal()}
@@ -536,6 +541,9 @@ async function initRemote(){
   const{data:{session}}=await SB.auth.getSession();
   if(session&&session.user){
     auth.uid=session.user.id;
+    await loadSnapshot();
+    const profileResult=await ensureRemoteProfile(session.user);
+    if(profileResult&&profileResult.err)return profileResult;
     await loadSnapshot();
     ensureAuthProfile(session.user);
     const me=ME();
@@ -560,6 +568,18 @@ const mapProfile=r=>({id:r.id,username:r.username,name:r.display_name||r.usernam
   photoId:r.photo_url||null,coverId:r.cover_url||null,verified:!!r.verified,suspended:!!r.suspended,
   demo:!!r.demo,mutualBase:r.mutual_base!=null?r.mutual_base:null,
   role:r.is_admin?'admin':'user',createdAt:ms(r.created_at),lastSeen:ms(r.last_seen)});
+async function ensureRemoteProfile(user){
+  if(!REMOTE||!user||!user.id)return{ok:true};
+  if((D.profiles||[]).some(p=>p.id===user.id))return{ok:true};
+  const md=user.user_metadata||{};
+  const username=String(md.username||((user.email||'user').split('@')[0])||'user').trim().toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,20)||('user_'+user.id.slice(0,6));
+  const row={id:user.id,username:username,display_name:md.display_name||md.name||username,
+    bio:md.bio||'',country:md.country||'',city:md.city||'',gender:md.gender||'',birthday:md.birthday||null,
+    verified:!!user.email_confirmed_at,last_seen:new Date().toISOString()};
+  const{error}=await SB.from('profiles').upsert(row,{onConflict:'id'});
+  if(error){console.error('[GHA] profile persistence:',error.message);return{err:'Your account exists, but the profile could not be saved: '+error.message}}
+  return{ok:true};
+}
 function ensureAuthProfile(user){
   if(!user||!user.id)return null;
   D.profiles=D.profiles||[];
@@ -656,9 +676,10 @@ const api={
     if((f.pass||'').length<8)return{err:'Password must be at least 8 characters.'};
     if(f.pass!==f.pass2)return{err:'Passwords do not match.'};
     const{data,error}=await SB.auth.signUp({email:f.email.trim(),password:f.pass,options:{
+      emailRedirectTo:location.origin+location.pathname,
       data:{username:un,display_name:f.displayName.trim(),bio:f.bio||'',country:f.country||'',city:f.city||'',gender:f.gender||'',birthday:f.birthday||''}}});
     if(error)return{err:error.message};
-    if(data.session){auth.uid=data.user.id;await loadSnapshot();return{ok:true,uid:data.user.id,admin:((ME()||{}).role==='admin')}}
+    if(data.session){auth.uid=data.user.id;await loadSnapshot();const pr=await ensureRemoteProfile(data.user);if(pr.err)return pr;await loadSnapshot();return{ok:true,uid:data.user.id,admin:((ME()||{}).role==='admin')}}
     state.pendingEmail=f.email.trim();
     return{ok:true,needsEmailConfirm:true};
   },
@@ -673,13 +694,13 @@ const api={
       if(h!==u.passHash)return{err:'Wrong password. Try again.'};
       u.lastSeen=Date.now();await DB.put('users',u);setSession(u);return{ok:true};
     }
-    let email=(ident||'').trim().toLowerCase();
-    const byName=(D.users||[]).find(u=>u.username===email);
-    if(byName&&!byName.demo)email=byName.email||email;
+    const email=(ident||'').trim().toLowerCase();
+    if(email.indexOf('@')<0)return{err:'Please log in with your email address. Your username remains saved on your profile.'};
     const{data,error}=await SB.auth.signInWithPassword({email:email,password:pass});
     if(error)return{err:error.message};
     auth.uid=data.user.id;await loadSnapshot();
-    ensureAuthProfile(data.user);
+    const pr=await ensureRemoteProfile(data.user);if(pr.err){await SB.auth.signOut();auth.uid=null;return pr}
+    await loadSnapshot();ensureAuthProfile(data.user);
     const me=ME();if(me&&me.suspended){await SB.auth.signOut();auth.uid=null;return{err:'This account is suspended.'}}
     api.syncVerified();return{ok:true};
   },
@@ -1550,7 +1571,7 @@ function renderAuth(){document.getElementById('app').innerHTML='<div class="auth
 function authTab(t){state.authTab=t;const b=document.getElementById('authBody');if(!b)return;
   const head='<div class="auth-tabs"><button class="auth-tab '+(t==='login'?'on':'')+'" data-action="authtab" data-t="login">Log in</button><button class="auth-tab '+(t==='signup'?'on':'')+'" data-action="authtab" data-t="signup">Sign up</button></div>';
   if(t==='login')b.innerHTML=head+'<h2>Welcome back</h2><p class="sub">Tell your gist. Africa is listening.</p>'+
-   '<div class="field"><label>Username or email</label><input id="liId"></div>'+
+   '<div class="field"><label>Email address</label><input id="liId" type="email" autocomplete="email"></div>'+
    '<div class="field"><label>Password</label><input id="liPass" type="password"></div>'+
    '<button id="loginBtn" type="button" class="btn pri" style="width:100%" data-action="login" onclick="event.stopPropagation();window.gistHubLogin&&window.gistHubLogin(this)">Log in</button>'+
    '<p class="foot"><button class="lnk" data-action="forgot">Forgot password?</button>'+(!REMOTE?' · <button class="lnk blue" data-action="demo-login">Explore as Emmanuel (demo)</button>':'')+'</p>';
@@ -1708,7 +1729,7 @@ const ACTIONS={
   const idEl=document.getElementById('liId'),passEl=document.getElementById('liPass');
   if(!idEl||!passEl)return toast('Login form is not ready. Refresh the page and try again.','x');
   const ident=idEl.value.trim(),pass=passEl.value;
-  if(!ident)return toast('Enter your username or email.','x');
+  if(!ident)return toast('Enter your email address.','x');
   if(!pass)return toast('Enter your password.','x');
   const b=btn&&btn.tagName?btn:document.getElementById('loginBtn');
   const old=b?b.textContent:'Log in';
@@ -1747,11 +1768,15 @@ const ACTIONS={
   toast('Email verified ✔','check');await loadSnapshot();renderAll()},
  'verify-open'(){if(REMOTE){authTab('verify');return}
   const u=(D.users||[]).find(x=>x.id===auth.uid)||{};state.pendingCode=u.verifyCode;authTab('verify')},
- async 'verify-resend'(){if(REMOTE){try{await SB.auth.resend({type:'signup',email:state.pendingEmail});toast('Email resent','mail')}catch(e){toast(e.message,'x')}return}
+ async 'verify-resend'(){if(REMOTE){try{
+    if(!state.pendingEmail)return toast('Enter your email again on the sign-up page, then request a new confirmation email.','x');
+    const{error}=await SB.auth.resend({type:'signup',email:state.pendingEmail,options:{emailRedirectTo:location.origin+location.pathname}});
+    if(error)return toast(error.message,'x');toast('Email resent','mail')
+   }catch(e){toast(e.message,'x')}return}
   const u=await DB.get('users',auth.uid);if(!u)return;
   u.verifyCode=String(rnd(100000,999999));await DB.put('users',u);state.pendingCode=u.verifyCode;authTab('verify');toast('New code generated','mail')},
  async 'verify-done'(){const{data:{session}}=await SB.auth.getSession();
-  if(session&&session.user){auth.uid=session.user.id;await loadSnapshot();await api.syncVerified();renderAll();toast('Email confirmed — welcome to GistHubAfrica!','check')}
+  if(session&&session.user){auth.uid=session.user.id;await loadSnapshot();const pr=await ensureRemoteProfile(session.user);if(pr.err)return toast(pr.err,'x');await loadSnapshot();await api.syncVerified();renderAll();toast('Email confirmed — welcome to GistHubAfrica!','check')}
   else toast('Not confirmed yet — tap the link in your email first','mail')},
  forgot(){authTab('forgot')},
  async 'forgot-go'(){const em=document.getElementById('fpEmail').value;
