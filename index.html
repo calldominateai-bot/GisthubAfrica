@@ -526,30 +526,18 @@ async function initRemote(){
   catch(e){mod=await import('https://esm.sh/@supabase/supabase-js@2')}
   SB=mod.createClient(GHA_CONFIG.url,GHA_CONFIG.anonKey,{auth:{persistSession:true,autoRefreshToken:true,storage:safeStorage}});
   SB.auth.onAuthStateChange((ev,session)=>{
-    if((ev==='SIGNED_IN'||ev==='TOKEN_REFRESHED'||ev==='INITIAL_SESSION')&&session&&session.user){
-      auth.uid=session.user.id;
-      setTimeout(async()=>{try{
-        await ensureRemoteProfile(session.user);
-        await loadSnapshot();
-        ensureAuthProfile(session.user);
-        renderAll();
-      }catch(e){console.error('[GHA] auth refresh:',e)}},0);
-    }
-    if(ev==='SIGNED_OUT'){auth.uid=null;try{renderAll()}catch(e){}}
+    if(session&&session.user)auth.user=session.user;
+    if(ev==='SIGNED_OUT'){auth.uid=null;auth.user=null;try{renderAll()}catch(e){}}
     if(ev==='PASSWORD_RECOVERY'){api.openRecoveryModal()}
   });
   const{data:{session}}=await SB.auth.getSession();
   if(session&&session.user){
-    auth.uid=session.user.id;
+    auth.uid=session.user.id;auth.user=session.user;
     await loadSnapshot();
-    const profileResult=await ensureRemoteProfile(session.user);
-    if(profileResult&&profileResult.err)return profileResult;
-    await loadSnapshot();
-    ensureAuthProfile(session.user);
     const me=ME();
-    if(me&&me.suspended){await SB.auth.signOut();auth.uid=null;return{err:'This account is suspended.'}}
+    if(me&&me.suspended){await SB.auth.signOut();auth.uid=null;auth.user=null;return{err:'This account is suspended.'}}
     api.syncVerified();
-  }else auth.uid=null;
+  }else{auth.uid=null;auth.user=null}
   return{ok:true};
 }
 function wireRealtime(){
@@ -568,47 +556,14 @@ const mapProfile=r=>({id:r.id,username:r.username,name:r.display_name||r.usernam
   photoId:r.photo_url||null,coverId:r.cover_url||null,verified:!!r.verified,suspended:!!r.suspended,
   demo:!!r.demo,mutualBase:r.mutual_base!=null?r.mutual_base:null,
   role:r.is_admin?'admin':'user',createdAt:ms(r.created_at),lastSeen:ms(r.last_seen)});
-async function ensureRemoteProfile(user){
-  if(!REMOTE||!user||!user.id)return{ok:true};
-  if((D.profiles||[]).some(p=>p.id===user.id))return{ok:true};
-  const md=user.user_metadata||{};
-  const username=String(md.username||((user.email||'user').split('@')[0])||'user').trim().toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,20)||('user_'+user.id.slice(0,6));
-  const row={id:user.id,username:username,display_name:md.display_name||md.name||username,
-    bio:md.bio||'',country:md.country||'',city:md.city||'',gender:md.gender||'',birthday:md.birthday||null,
-    verified:!!user.email_confirmed_at,last_seen:new Date().toISOString()};
-  const{error}=await SB.from('profiles').upsert(row,{onConflict:'id'});
-  if(error){console.error('[GHA] profile persistence:',error.message);return{err:'Your account exists, but the profile could not be saved: '+error.message}}
-  return{ok:true};
-}
-function ensureAuthProfile(user){
-  if(!user||!user.id)return null;
-  D.profiles=D.profiles||[];
-  let me=D.profiles.find(p=>p.id===user.id);
-  const md=user.user_metadata||{};
-  if(!me){
-    const username=String(md.username||((user.email||'user').split('@')[0])||'user').trim().toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,20)||'user';
-    me={
-      id:user.id,username:username,name:md.display_name||md.name||username,displayName:md.display_name||md.name||username,
-      email:user.email||'',bio:md.bio||'',country:md.country||'',city:md.city||'',gender:md.gender||'',birthday:md.birthday||'',
-      photoId:null,coverId:null,verified:!!user.email_confirmed_at,suspended:false,demo:false,mutualBase:null,
-      role:'user',createdAt:ms(user.created_at),lastSeen:Date.now()
-    };
-    D.profiles.push(me);
-  }else{
-    if(user.email&&!me.email)me.email=user.email;
-    if(user.email_confirmed_at)me.verified=true;
-  }
-  D.users=D.profiles;
-  return me;
-}
 const mapPost=r=>({id:r.id,uid:r.user_id,text:r.text||'',images:r.images||[],privacy:r.privacy||'pub',
-  feeling:r.feeling||'',groupId:r.group_id,demo:!!r.demo,editedAt:r.edited_at?ms(r.edited_at):null,
+  feeling:r.feeling||'',groupId:r.group_id,demo:!!r.demo,editedAt:r.editedAt?ms(r.edited_at):null,
   baseStats:r.base_stats||{},baseComments:r.base_comments||0,baseShares:r.base_shares||0,createdAt:ms(r.created_at)});
 const mapMsg=r=>({id:r.id,cid:r.conversation_id,uid:r.user_id,text:r.text||'',image:r.image_url||null,
   deleted:!!r.deleted,demo:!!r.demo,createdAt:ms(r.created_at)});
 
 async function remoteLoadAll(){
-  const one=async(t,sel,ord,lim)=>{try{let q=SB.from(t).select(sel||'*').limit(lim||1000);if(ord){const col=Array.isArray(ord)?ord[0]:ord;const asc=Array.isArray(ord)?!!ord[1]:true;q=q.order(col,{ascending:asc})}const{data,error}=await q;if(error)throw error;return data||[]}
+  const one=async(t,sel,ord,lim)=>{try{let q=SB.from(t).select(sel||'*').limit(lim||1000);if(ord){const isArr=Array.isArray(ord);q=q.order(isArr?ord[0]:ord,{ascending:isArr?!!ord[1]:true})}const{data,error}=await q;if(error)throw error;return data||[]}
     catch(e){console.error('[GHA] load '+t+':',e.message);return[]}};
   const profiles=await one('profiles','*','created_at',500);
   const posts=await one('posts','*',['created_at',false],200);
@@ -676,10 +631,9 @@ const api={
     if((f.pass||'').length<8)return{err:'Password must be at least 8 characters.'};
     if(f.pass!==f.pass2)return{err:'Passwords do not match.'};
     const{data,error}=await SB.auth.signUp({email:f.email.trim(),password:f.pass,options:{
-      emailRedirectTo:location.origin+location.pathname,
       data:{username:un,display_name:f.displayName.trim(),bio:f.bio||'',country:f.country||'',city:f.city||'',gender:f.gender||'',birthday:f.birthday||''}}});
     if(error)return{err:error.message};
-    if(data.session){auth.uid=data.user.id;await loadSnapshot();const pr=await ensureRemoteProfile(data.user);if(pr.err)return pr;await loadSnapshot();return{ok:true,uid:data.user.id,admin:((ME()||{}).role==='admin')}}
+    if(data.session){auth.uid=data.user.id;auth.user=data.user;await loadSnapshot();return{ok:true,uid:data.user.id,admin:((ME()||{}).role==='admin')}}
     state.pendingEmail=f.email.trim();
     return{ok:true,needsEmailConfirm:true};
   },
@@ -694,14 +648,13 @@ const api={
       if(h!==u.passHash)return{err:'Wrong password. Try again.'};
       u.lastSeen=Date.now();await DB.put('users',u);setSession(u);return{ok:true};
     }
-    const email=(ident||'').trim().toLowerCase();
-    if(email.indexOf('@')<0)return{err:'Please log in with your email address. Your username remains saved on your profile.'};
+    let email=(ident||'').trim().toLowerCase();
+    const byName=(D.users||[]).find(u=>u.username===email);
+    if(byName&&!byName.demo)email=byName.email||email;
     const{data,error}=await SB.auth.signInWithPassword({email:email,password:pass});
     if(error)return{err:error.message};
-    auth.uid=data.user.id;await loadSnapshot();
-    const pr=await ensureRemoteProfile(data.user);if(pr.err){await SB.auth.signOut();auth.uid=null;return pr}
-    await loadSnapshot();ensureAuthProfile(data.user);
-    const me=ME();if(me&&me.suspended){await SB.auth.signOut();auth.uid=null;return{err:'This account is suspended.'}}
+    auth.uid=data.user.id;auth.user=data.user;await loadSnapshot();
+    const me=ME();if(me&&me.suspended){await SB.auth.signOut();auth.uid=null;auth.user=null;return{err:'This account is suspended.'}}
     api.syncVerified();return{ok:true};
   },
   async logout(){if(REMOTE){try{await SB.auth.signOut()}catch(e){}}clearSession();auth.uid=null},
@@ -783,7 +736,7 @@ const api={
       p.text=text.trim();if(!p.groupId)p.privacy=privacy;p.editedAt=Date.now();
       await DB.put('posts',p);return{ok:true};
     }
-    const{error}=await SB.from('posts').update({text:text.trim(),privacy:privacy,edited_at:new Date().toISOString()}).eq('id',id).eq('user_id',auth.uid);
+    const{error}=await SB.from('posts').update({text:text.trim(),privacy:privacy,edited_at:new Date().toISOString()}).eq('id',id).eq('user_id',auth.uid());
     if(error)return{err:error.message};return{ok:true};
   },
   async deletePost(id){
@@ -966,7 +919,7 @@ const api={
     }
     const{error}=await SB.from('messages').insert({conversation_id:cid,user_id:auth.uid,text:text.trim(),image_url:imageUrl||null});
     if(error)return{err:error.message};
-    try{await SB.from('conversation_members').update({last_read_at:new Date().toISOString()}).eq('conversation_id',cid).eq('user_id',auth.uid)}catch(e){}
+    try{await SB.from('conversation_members').update({last_read_at:new Date().toISOString()}).eq('conversation_id',cid).eq('user_id',auth.uid())}catch(e){}
     const other=(D.convMembers||[]).find(m=>m.cid===cid&&m.uid!==auth.uid);
     if(other)await notify(other.uid,auth.uid,'msg','sent you a gist message.',{k:'chat',id:cid});
     return{ok:true};
@@ -987,7 +940,7 @@ const api={
       for(const n of(D.notifications||[]).filter(n=>n.uid===auth.uid&&!n.read&&n.ref&&n.ref.k==='chat'&&n.ref.id===cid)){n.read=true;await DB.put('notifications',n)}
       return;
     }
-    try{await SB.from('conversation_members').update({last_read_at:new Date().toISOString()}).eq('conversation_id',cid).eq('user_id',auth.uid);
+    try{await SB.from('conversation_members').update({last_read_at:new Date().toISOString()}).eq('conversation_id',cid).eq('user_id',auth.uid());
     const list=(D.notifications||[]).filter(n=>n.uid===auth.uid&&!n.read&&n.ref&&n.ref.k==='chat'&&n.ref.id===cid);
     for(const n of list)await SB.from('notifications').update({read:true}).eq('id',n.id)}catch(e){}
   },
@@ -997,7 +950,7 @@ const api={
       if(!m||m.uid!==auth.uid)return{err:'You can only delete your own messages.'};
       m.deleted=true;m.text='';m.image=null;await DB.put('messages',m);return{ok:true};
     }
-    const{error}=await SB.from('messages').update({deleted:true,text:'',image_url:null}).eq('id',mid).eq('user_id',auth.uid);
+    const{error}=await SB.from('messages').update({deleted:true,text:'',image_url:null}).eq('id',mid).eq('user_id',auth.uid());
     if(error)return{err:error.message};return{ok:true};
   },
   async createStory(f){
@@ -1072,7 +1025,7 @@ const api={
     }
     const up={};if(f.name)up.name=f.name;if(f.desc!=null)up.description=f.desc;if(f.privacy)up.privacy=f.privacy;
     if(f.photoId!==undefined)up.photo_url=f.photoId;
-    const{error}=await SB.from('groups').update(up).eq('id',gid).eq('owner',auth.uid);
+    const{error}=await SB.from('groups').update(up).eq('id',gid).eq('owner',auth.uid());
     if(error)return{err:error.message};return{ok:true};
   },
   async markAllRead(){
@@ -1081,7 +1034,7 @@ const api={
   },
   async markNotifRead(id){
     if(!REMOTE){const n=await DB.get('notifications',id);if(n){n.read=true;await DB.put('notifications',n)}return}
-    try{await SB.from('notifications').update({read:true}).eq('id',id).eq('user_id',auth.uid)}catch(e){}
+    try{await SB.from('notifications').update({read:true}).eq('id',id).eq('user_id',auth.uid())}catch(e){}
   },
   async report(type,targetId,reason){
     if(!REMOTE){await DB.put('reports',{id:uid(),by:auth.uid,type,targetId,reason,done:false,demo:false,createdAt:Date.now()});return{ok:true}}
@@ -1125,9 +1078,9 @@ const api={
     if(!REMOTE){if(!auth.uid)return;const u=await DB.get('users',auth.uid);if(u){u.lastSeen=Date.now();await DB.put('users',u)}return}
     try{await SB.from('profiles').update({last_seen:new Date().toISOString()}).eq('id',auth.uid)}catch(e){}
   }
-};/* ---------- state ---------- */
+}; /* ---------- state ---------- */
 let D={};
-const auth={uid:null};
+const auth={uid:null,user:null};
 const state={view:'feed',profile:null,ptab:'gists',ftab:'requests',gtab:'posts',gid:null,atab:'overview',aq:'',
   filter:null,openCmts:{},drafts:{},replyTo:{},cImg:null,hidden:{},
   composer:{text:'',img:null,feeling:null,aud:'pub'},storyDraft:{bg:0,text:'',img:null},pendingCode:null,pendingEmail:null,resetEmail:null,gPhoto:null,authTab:'login'};
@@ -1552,9 +1505,24 @@ function renderMain(){const m=document.getElementById('main');if(!m)return;
   m.innerHTML=html;
   const ct=document.getElementById('compText');if(ct){ct.style.height='auto';ct.style.height=ct.scrollHeight+'px'}
   try{buildLeft();buildBnav()}catch(err){console.error('[GHA] nav render failed:',err)}}
+/* A signed-in Supabase user whose profiles row is missing or not yet visible
+   still gets a working in-app profile built from the session, instead of being
+   bounced back to the login screen; the missing row is repaired in the background. */
+function remoteFallbackProfile(){
+  const u=auth.user;if(!u||!u.id)return null;
+  const m=u.user_metadata||{};
+  return{id:u.id,username:m.username||('user_'+u.id.slice(0,8)),name:m.display_name||m.username||(u.email||'Member').split('@')[0],
+    displayName:m.display_name||m.username||null,bio:'',country:'',city:'',gender:'',birthday:'',photoId:null,coverId:null,
+    verified:!!u.email_confirmed_at,suspended:false,demo:false,mutualBase:null,role:'user',createdAt:ms(u.created_at),lastSeen:Date.now()}}
+async function repairRemoteProfile(p){
+  try{const{error}=await SB.from('profiles').insert({id:p.id,username:p.username,display_name:p.name,verified:p.verified});
+    if(error)console.error('[GHA] profile repair:',error.message)}catch(e){console.error('[GHA] profile repair:',e&&e.message)}}
 function renderAll(){
   if(!auth.uid){renderAuth();document.getElementById('dock').innerHTML='';const b=document.getElementById('bnav');if(b)b.innerHTML='';return}
-  const me=ME();if(!me){console.error('[GHA] authenticated user profile was not loaded; keeping the Supabase session active');renderAuth();return}
+  let me=ME();
+  if(!me){me=REMOTE?remoteFallbackProfile():null;
+    if(me){D.profiles=(D.profiles||[]).concat([me]);D.users=D.profiles;repairRemoteProfile(me)}
+    else{clearSession();auth.uid=null;renderAuth();return}}
   try{buildTop()}catch(err){console.error('[GHA] top render failed:',err);return}
   renderMain();
   try{buildRight()}catch(err){console.error('[GHA] right render failed:',err)}
@@ -1571,9 +1539,9 @@ function renderAuth(){document.getElementById('app').innerHTML='<div class="auth
 function authTab(t){state.authTab=t;const b=document.getElementById('authBody');if(!b)return;
   const head='<div class="auth-tabs"><button class="auth-tab '+(t==='login'?'on':'')+'" data-action="authtab" data-t="login">Log in</button><button class="auth-tab '+(t==='signup'?'on':'')+'" data-action="authtab" data-t="signup">Sign up</button></div>';
   if(t==='login')b.innerHTML=head+'<h2>Welcome back</h2><p class="sub">Tell your gist. Africa is listening.</p>'+
-   '<div class="field"><label>Email address</label><input id="liId" type="email" autocomplete="email"></div>'+
+   '<div class="field"><label>Username or email</label><input id="liId"></div>'+
    '<div class="field"><label>Password</label><input id="liPass" type="password"></div>'+
-   '<button id="loginBtn" type="button" class="btn pri" style="width:100%" data-action="login" onclick="event.stopPropagation();window.gistHubLogin&&window.gistHubLogin(this)">Log in</button>'+
+   '<button class="btn pri" style="width:100%" data-action="login">Log in</button>'+
    '<p class="foot"><button class="lnk" data-action="forgot">Forgot password?</button>'+(!REMOTE?' · <button class="lnk blue" data-action="demo-login">Explore as Emmanuel (demo)</button>':'')+'</p>';
   else if(t==='signup')b.innerHTML=head+'<h2>Create your account</h2><p class="sub">Your own space on GistHubAfrica.</p>'+
    '<div class="frow2"><div class="field"><label>Display name *</label><input id="suName"></div><div class="field"><label>Username *</label><input id="suUser" placeholder="lowercase, no spaces"></div></div>'+
@@ -1725,30 +1693,10 @@ const ACTIONS={
  profile(t){state.view='profile';state.profile=t.getAttribute('data-uid');state.ptab='gists';closePops();renderMain();scrollTo({top:0})},
  authtab(t){authTab(t.getAttribute('data-t'))},
  'authtab-x'(t){authTab(t.getAttribute('data-t'))},
- async login(btn){
-  const idEl=document.getElementById('liId'),passEl=document.getElementById('liPass');
-  if(!idEl||!passEl)return toast('Login form is not ready. Refresh the page and try again.','x');
-  const ident=idEl.value.trim(),pass=passEl.value;
-  if(!ident)return toast('Enter your email address.','x');
-  if(!pass)return toast('Enter your password.','x');
-  const b=btn&&btn.tagName?btn:document.getElementById('loginBtn');
-  const old=b?b.textContent:'Log in';
-  if(b){b.disabled=true;b.textContent='Logging in…'}
-  try{
-    const r=await Promise.race([
-      api.login(ident,pass),
-      new Promise(resolve=>setTimeout(()=>resolve({err:'Login is taking too long. Please try again.'}),20000))
-    ]);
-    if(r.err)return toast(r.err,'x');
-    if(r.demo)toast('Exploring as Emmanuel (demo)','sparkle');
-    await loadSnapshot();renderAll();toast('Welcome back!','check');
-  }catch(e){
-    console.error('[GHA] login failed:',e);
-    toast((e&&e.message)||'Login failed. Please try again.','x');
-  }finally{
-    const live=document.getElementById('loginBtn');
-    if(live){live.disabled=false;live.textContent=old}
-  }},
+ async login(){const r=await api.login(document.getElementById('liId').value,document.getElementById('liPass').value);
+  if(r.err)return toast(r.err,'x');
+  if(r.demo)toast('Exploring as Emmanuel (demo)','sparkle');
+  await loadSnapshot();renderAll();toast('Welcome back!','check')},
  'demo-login'(){if(REMOTE)return toast('Demo login runs in the offline copy — sign up free here, it takes 20 seconds','sparkle');
   const em=(D.users||[]).find(u=>u.id==='demo_emmanuel');
   if(!em)return toast('Demo user not found — reload the page','x');
@@ -1768,15 +1716,11 @@ const ACTIONS={
   toast('Email verified ✔','check');await loadSnapshot();renderAll()},
  'verify-open'(){if(REMOTE){authTab('verify');return}
   const u=(D.users||[]).find(x=>x.id===auth.uid)||{};state.pendingCode=u.verifyCode;authTab('verify')},
- async 'verify-resend'(){if(REMOTE){try{
-    if(!state.pendingEmail)return toast('Enter your email again on the sign-up page, then request a new confirmation email.','x');
-    const{error}=await SB.auth.resend({type:'signup',email:state.pendingEmail,options:{emailRedirectTo:location.origin+location.pathname}});
-    if(error)return toast(error.message,'x');toast('Email resent','mail')
-   }catch(e){toast(e.message,'x')}return}
+ async 'verify-resend'(){if(REMOTE){try{await SB.auth.resend({type:'signup',email:state.pendingEmail});toast('Email resent','mail')}catch(e){toast(e.message,'x')}return}
   const u=await DB.get('users',auth.uid);if(!u)return;
   u.verifyCode=String(rnd(100000,999999));await DB.put('users',u);state.pendingCode=u.verifyCode;authTab('verify');toast('New code generated','mail')},
  async 'verify-done'(){const{data:{session}}=await SB.auth.getSession();
-  if(session&&session.user){auth.uid=session.user.id;await loadSnapshot();const pr=await ensureRemoteProfile(session.user);if(pr.err)return toast(pr.err,'x');await loadSnapshot();await api.syncVerified();renderAll();toast('Email confirmed — welcome to GistHubAfrica!','check')}
+  if(session&&session.user){auth.uid=session.user.id;auth.user=session.user;await loadSnapshot();await api.syncVerified();renderAll();toast('Email confirmed — welcome to GistHubAfrica!','check')}
   else toast('Not confirmed yet — tap the link in your email first','mail')},
  forgot(){authTab('forgot')},
  async 'forgot-go'(){const em=document.getElementById('fpEmail').value;
@@ -2042,7 +1986,6 @@ const ACTIONS={
   updateBadges()})()},
  'jump-post'(t){goFeedAndFlash(t.getAttribute('data-id'))},
 };
-window.gistHubLogin=function(btn){return ACTIONS.login(btn)};
 
 /* ---------- global listeners ---------- */
 document.addEventListener('click',e=>{
